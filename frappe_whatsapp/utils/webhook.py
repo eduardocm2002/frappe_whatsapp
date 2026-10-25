@@ -77,6 +77,146 @@ def post():
 			message_type = message['type']
 			is_reply = True if message.get('context') and 'forwarded' not in message.get('context') else False
 			reply_to_message_id = message['context']['id'] if is_reply else None
+
+			# PRODSIA: inbound structured messages
+			if message_type in ("location", "contacts"):
+				# Evitar duplicados cuando Meta reenvía el webhook.
+				if frappe.db.exists("WhatsApp Message", {"message_id": message["id"]}):
+					continue
+
+				if message_type == "location":
+					loc = message.get("location") or {}
+					lat = loc.get("latitude")
+					lon = loc.get("longitude")
+					if lat is None or lon is None:
+						continue
+
+					body = f"https://www.google.com/maps?q={lat},{lon}"
+					content_type = "location"
+
+				else:
+					parts = []
+					for contact in message.get("contacts", []):
+						name = contact.get("name") or {}
+						full_name = name.get("formatted_name") or "Sin nombre"
+						phones = [
+							p.get("phone") or p.get("wa_id")
+							for p in contact.get("phones", [])
+						]
+						phones = [str(p) for p in phones if p]
+						parts.append(
+							full_name + ("\n" + "\n".join(phones) if phones else "")
+						)
+
+					body = "\n\n".join(parts) or "Contacto compartido"
+					content_type = "contact"
+
+				frappe.get_doc({
+					"doctype": "WhatsApp Message",
+					"type": "Incoming",
+					"from": message["from"],
+					"message_id": message["id"],
+					"reply_to_message_id": reply_to_message_id,
+					"is_reply": is_reply,
+					"message": body,
+					"content_type": content_type,
+					"profile_name": sender_profile_name,
+					"whatsapp_account": whatsapp_account.name,
+				}).insert(ignore_permissions=True)
+				continue
+
+			# Respuestas interactivas no contempladas en el webhook original.
+			if message_type == "interactive":
+				interactive = message.get("interactive") or {}
+				if interactive.get("type") not in (
+					"button_reply", "list_reply", "nfm_reply"
+				):
+					if frappe.db.exists("WhatsApp Message", {"message_id": message["id"]}):
+						continue
+					frappe.get_doc({
+						"doctype": "WhatsApp Message",
+						"type": "Incoming",
+						"from": message["from"],
+						"message_id": message["id"],
+						"message": json.dumps(interactive, ensure_ascii=False),
+						"content_type": "interactive",
+						"profile_name": sender_profile_name,
+						"whatsapp_account": whatsapp_account.name,
+					}).insert(ignore_permissions=True)
+					continue
+
+			# PRODSIA_LOCATION_CONTACTS_V2
+			if message_type in ("location", "contacts"):
+				if frappe.db.exists(
+					"WhatsApp Message",
+					{"message_id": message["id"]}
+				):
+					continue
+
+				if message_type == "location":
+					location = message.get("location") or {}
+					lat = location.get("latitude")
+					lon = location.get("longitude")
+
+					if lat is None or lon is None:
+						frappe.logger("whatsapp").warning(
+							"Ubicación sin coordenadas: %s", message.get("id")
+						)
+						continue
+
+					text = f"https://www.google.com/maps?q={lat},{lon}"
+
+					if location.get("name"):
+						text += "\n" + location["name"]
+
+					if location.get("address"):
+						text += "\n" + location["address"]
+
+					content_type = "location"
+
+				else:
+					contacts = message.get("contacts") or []
+					lines = []
+
+					for contact in contacts:
+						name = contact.get("name") or {}
+						full_name = name.get("formatted_name")
+
+						if not full_name:
+							full_name = " ".join(
+								str(name.get(k) or "")
+								for k in ("first_name", "last_name")
+							).strip() or "Sin nombre"
+
+						phones = [
+							str(phone.get("phone") or phone.get("wa_id"))
+							for phone in contact.get("phones", [])
+							if phone.get("phone") or phone.get("wa_id")
+						]
+
+						lines.append(
+							full_name +
+							("\n" + "\n".join(phones) if phones else "")
+						)
+
+					text = "\n\n".join(lines) or "Contacto compartido"
+					content_type = "contact"
+
+				frappe.get_doc({
+					"doctype": "WhatsApp Message",
+					"type": "Incoming",
+					"from": message["from"],
+					"message_id": message["id"],
+					"reply_to_message_id": reply_to_message_id,
+					"is_reply": is_reply,
+					"message": text,
+					"content_type": content_type,
+					"profile_name": sender_profile_name,
+					"whatsapp_account": whatsapp_account.name,
+				}).insert(ignore_permissions=True)
+
+				continue
+
 			if message_type == 'text':
 				frappe.get_doc({
 					"doctype": "WhatsApp Message",
